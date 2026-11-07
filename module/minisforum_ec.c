@@ -11,7 +11,8 @@
  *
  * Each fan (pwm1 CPU, pwm2 system) runs in one of three modes: a fixed value
  * written by userspace, this driver's temperature curve (module parameters
- * cpu_curve and system_curve), or the EC firmware's own policy.
+ * cpu_curve and system_curve, linearly interpolated between their points), or
+ * the EC firmware's own policy.
  *
  * EC memory writes are limited to what the plugin writes: the system-fan
  * handoff (override 0x088b to 0x00/0xff, target 0x0885 to 0..51) and the
@@ -658,11 +659,12 @@ static const char * const mode_names[] = {
 #define CURVE_FIRMWARE		(-1)
 
 /*
- * A curve is a list of temp:code points in ascending temperature. The point
- * in force is the last one whose temperature has been reached (the first
- * point below that); going down, a point is left once the temperature is more
- * than CURVE_HYST degrees below it. CURVE_FIRMWARE hands the fan to the
- * firmware.
+ * A curve is a list of temp:code points in ascending temperature. Between two
+ * points the goal is linearly interpolated in RPM, so the target moves
+ * continuously with the temperature; adjacent segments meet at their shared
+ * point. A firmware point is never interpolated into: the code of the point
+ * below it holds until the temperature reaches the handoff, and coming back
+ * needs the usual CURVE_HYST degrees below it.
  */
 struct curve {
 	int n;
@@ -676,23 +678,28 @@ struct curve_param {
 	struct curve curve;
 };
 
+/*
+ * Default curves: flat and quiet across the idle band, then a linear ramp;
+ * with interpolation a rising temperature raises the target continuously
+ * instead of jumping at each point.
+ */
 static struct curve_param curve_params[NR_FANS] = {
 	[FAN_CPU] = {
 		.fan = "cpu",
 		.id = FAN_CPU,
 		.curve = {
 			.n = 5,
-			.temp = { 0, 25, 45, 54, 66 },
-			.code = { 0, 10, 14, 18, CURVE_FIRMWARE },
+			.temp = { 0, 25, 42, 55, 66 },
+			.code = { 0, 10, 10, 16, CURVE_FIRMWARE },
 		},
 	},
 	[FAN_SYS] = {
 		.fan = "system",
 		.id = FAN_SYS,
 		.curve = {
-			.n = 4,
-			.temp = { 0, 25, 40, 50 },
-			.code = { 0, 10, 16, CURVE_FIRMWARE },
+			.n = 5,
+			.temp = { 0, 25, 42, 50, 55 },
+			.code = { 0, 10, 10, 16, CURVE_FIRMWARE },
 		},
 	},
 };
@@ -785,12 +792,15 @@ static const struct kernel_param_ops curve_ops = {
 
 module_param_cb(cpu_curve, &curve_ops, &curve_params[FAN_CPU], 0644);
 MODULE_PARM_DESC(cpu_curve,
-		 "CPU fan curve on the EC CPU temperature, default \"0:0,25:1000,45:1400,54:1800,66:firmware\"; "
+		 "CPU fan curve on the EC CPU temperature, default \"0:0,25:1000,42:1000,55:1600,66:firmware\"; "
+		 "between points the goal is linearly interpolated; "
 		 "empty leaves the fan to the firmware; "
 		 "rpm 0 or 600..5100 (F7BSI) / 1000..5100 (F7BSC, HPBSD)");
 module_param_cb(system_curve, &curve_ops, &curve_params[FAN_SYS], 0644);
 MODULE_PARM_DESC(system_curve,
-		 "System fan curve on the EC system temperature, default \"0:0,25:1000,40:1600,50:firmware\"; empty leaves the fan to the firmware; rpm 0 or 800..5100 (800..4000 on HPBSD)");
+		 "System fan curve on the EC system temperature, default \"0:0,25:1000,42:1000,50:1600,55:firmware\"; "
+		 "between points the goal is linearly interpolated; "
+		 "empty leaves the fan to the firmware; rpm 0 or 800..5100 (800..4000 on HPBSD)");
 
 struct mec_data;
 struct fan;
@@ -1600,6 +1610,7 @@ static int fan_next_code(const struct fan *f, int goal)
 static int curve_goal(struct mec_data *d, struct fan *f, const struct curve *c, u8 temp)
 {
 	int level = clamp(f->level, 0, c->n - 1);
+	int lo, hi, span_t, span_rpm, rpm;
 
 	while (level + 1 < c->n && temp >= c->temp[level + 1])
 		level++;
@@ -1614,7 +1625,21 @@ static int curve_goal(struct mec_data *d, struct fan *f, const struct curve *c, 
 				f->name, temp, c->temp[level], c->code[level] * 100);
 		f->level = level;
 	}
-	return c->code[level];
+
+	lo = c->code[level];
+	if (lo == CURVE_FIRMWARE)
+		return CURVE_FIRMWARE;
+	if (level + 1 >= c->n)
+		return lo;			/* clamped at the last point */
+
+	hi = c->code[level + 1];
+	if (hi == CURVE_FIRMWARE)
+		return lo;			/* hold until the handoff point */
+
+	span_t = c->temp[level + 1] - c->temp[level];
+	span_rpm = (hi - lo) * 100;
+	rpm = lo * 100 + DIV_ROUND_CLOSEST((temp - c->temp[level]) * span_rpm, span_t);
+	return DIV_ROUND_CLOSEST(rpm, 100);
 }
 
 /* A steady target whose RPM still swings by HUNT_SPREAD means the EC loop is hunting. */
