@@ -230,7 +230,7 @@ struct board_host {
 	const char *value;
 };
 
-struct ec_version {
+struct ec_fw_version {
 	u8 major;
 	u8 minor;
 };
@@ -239,7 +239,7 @@ struct board {
 	const char *name;
 	const struct board_host *host;
 	size_t n_host;
-	const struct ec_version *ec_versions;
+	const struct ec_fw_version *ec_versions;
 	size_t n_ec_versions;
 	const struct cpu_profile *cpu_profiles;
 	size_t n_cpu_profiles;
@@ -269,10 +269,10 @@ static const struct board_host hpbsd_host[] = {
 	{ DMI_BOARD_VERSION, "1.0" },
 };
 
-static const struct ec_version f7bsi_ec_versions[] = { { 0, 5 } };
-static const struct ec_version f7bsc_ec_versions[] = { { 2, 6 } };
+static const struct ec_fw_version f7bsi_ec_versions[] = { { 0, 5 } };
+static const struct ec_fw_version f7bsc_ec_versions[] = { { 2, 6 } };
 /* PlatformProfiles.cs:466: the package conflicts between 0.1 and the advertised 0.2. */
-static const struct ec_version hpbsd_ec_versions[] = { { 0, 1 }, { 0, 2 } };
+static const struct ec_fw_version hpbsd_ec_versions[] = { { 0, 1 }, { 0, 2 } };
 
 static const struct board boards[] = {
 	{
